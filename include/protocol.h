@@ -13,6 +13,8 @@ static inline void topic_state(char* out, size_t n, const char* ctrl_id) { topic
 static inline void topic_cmd  (char* out, size_t n, const char* ctrl_id) { topic_make(out, n, ctrl_id, "cmd"); }
 static inline void topic_evt  (char* out, size_t n, const char* ctrl_id) { topic_make(out, n, ctrl_id, "evt"); }
 static inline void topic_lwt  (char* out, size_t n, const char* ctrl_id) { topic_make(out, n, ctrl_id, "lwt"); }
+static inline void topic_hist (char* out, size_t n, const char* ctrl_id) { topic_make(out, n, ctrl_id, "hist"); }
+
 
 // wildcard para dashboard (assinatura):
 // perferro/estufa/v1/+/state  (dashboard)

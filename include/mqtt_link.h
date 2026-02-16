@@ -39,3 +39,6 @@ bool mqtt_just_connected();   // true 1x quando conecta
 bool mqtt_publish_state(const MqttState& s);     // retained
 bool mqtt_publish_ack(const char* msgId, bool ok, const char* msg = nullptr);
 bool mqtt_publish_fault(const char* code, const char* msg);
+bool mqtt_publish_hist(const char* payload, size_t len, bool retained=false);
+bool mqtt_publish_reset(const char* msg);
+

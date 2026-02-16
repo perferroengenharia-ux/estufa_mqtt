@@ -9,6 +9,11 @@
 #include "wifi_link.h"
 #include "mqtt_link.h"
 
+#include <Preferences.h>
+#include <time.h>
+#include <esp_system.h>
+#include <ArduinoJson.h>
+
 // ======= PINOS =======
 static const uint8_t PIN_DS18B20   = 4;
 static const uint8_t PIN_SSR       = 26; // BC548 -> SSR
@@ -47,6 +52,36 @@ static volatile bool  g_heating   = false;
 
 // Mutex leve para proteger o snapshot/variáveis compartilhadas
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// ========= HISTÓRICO 24H (1 ponto/hora) =========
+struct HistPoint {
+  uint32_t ts;   // epoch (segundos). Se não tiver, 0.
+  float temp;
+};
+
+static Preferences g_prefs;
+
+static HistPoint g_hist[24];
+static uint8_t   g_histHead  = 0;   // próxima posição de escrita
+static uint8_t   g_histCount = 0;   // 0..24
+static uint32_t  g_histLastStoreMs = 0;
+
+// Mutex do histórico (evita race entre tasks)
+static SemaphoreHandle_t g_histMutex = nullptr;
+
+// reseta/energia
+static bool g_pendingResetEvt = false;
+static char g_resetMsg[64] = {0};
+
+// ===== Forward declarations (histórico) =====
+static bool time_is_valid();
+static uint32_t now_epoch_or_zero();
+
+static void hist_load();
+static void hist_save();
+static void hist_add_point(float tempC);
+static void hist_maybe_store(uint32_t nowMs, bool tempValid, float tempC);
+static void hist_publish_all();
 
 static float clampf(float x, float lo, float hi) {
   if (x < lo) return lo;
@@ -106,6 +141,13 @@ static void on_mqtt_cmd(const MqttCommand& c) {
     return;
   }
 
+  if (strcmp(c.cmd, "req_hist") == 0) {
+    // ACK primeiro (opcional) e responde com histórico
+    mqtt_publish_ack(c.msgId, true);
+    hist_publish_all();
+    return;
+  }
+
   mqtt_publish_ack(c.msgId, false, "cmd invalido");
 }
 
@@ -144,6 +186,9 @@ static void taskControle(void* pv) {
     sensor_update(now);
     const bool  tempValid = sensor_has_value();
     const float tempC     = sensor_get_c();
+
+    // Histórico 24h (1 ponto/hora)
+    hist_maybe_store(now, tempValid, tempC);
 
     // 3) Controlador 1 Hz
     if (now - lastControl >= CONTROL_UPDATE_MS) {
@@ -229,14 +274,29 @@ static void taskControle(void* pv) {
 static void taskRede(void* pv) {
   uint32_t lastPub = 0;
 
+  // Detecta “borda de conexão” sem depender de mqtt_just_connected()
+  bool lastConn = false;
+
   for (;;) {
     const uint32_t now = millis();
 
     wifi_update();
     mqtt_update();
 
+    const bool nowConn = mqtt_is_connected();
+    if (nowConn && !lastConn) {
+      // Conectou agora: tenta NTP e publica RESET pendente
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+      if (g_pendingResetEvt) {
+        mqtt_publish_reset(g_resetMsg);
+        g_pendingResetEvt = false;
+      }
+    }
+    lastConn = nowConn;
+
     // Publica state periodicamente se MQTT estiver conectado
-    if (mqtt_is_connected() && (now - lastPub >= MQTT_STATE_PUB_MS)) {
+    if (nowConn && (now - lastPub >= MQTT_STATE_PUB_MS)) {
       lastPub = now;
 
       bool  localOn;
@@ -257,17 +317,17 @@ static void taskRede(void* pv) {
       if (!localOn || !tempValid) u_pct = 0.0f;
 
       MqttState s;
-      s.id       = CTRL_ID;
-      s.systemOn = localOn;
-      s.heating  = heating;
-      s.tempValid= tempValid;
-      s.tempC    = tempC;
-      s.setpoint = localSp;
-      s.u_pct    = u_pct;
-      s.a1       = meuControle.a1;
-      s.b0       = meuControle.b0;
-      s.rssi     = wifi_rssi();
-      s.ms       = now;
+      s.id        = CTRL_ID;
+      s.systemOn  = localOn;
+      s.heating   = heating;
+      s.tempValid = tempValid;
+      s.tempC     = tempC;
+      s.setpoint  = localSp;
+      s.u_pct     = u_pct;
+      s.a1        = meuControle.a1;
+      s.b0        = meuControle.b0;
+      s.rssi      = wifi_rssi(); // ok enviar; app pode ignorar
+      s.ms        = now;
 
       mqtt_publish_state(s);
 
@@ -283,6 +343,31 @@ static void taskRede(void* pv) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  // Mutex do histórico
+  g_histMutex = xSemaphoreCreateMutex();
+
+  // Detecta reset / energia
+  esp_reset_reason_t rr = esp_reset_reason();
+  const char* rmsg = "RESET";
+  switch (rr) {
+    case ESP_RST_POWERON:  rmsg = "POWERON"; break;
+    case ESP_RST_BROWNOUT: rmsg = "BROWNOUT"; break;
+    case ESP_RST_SW:       rmsg = "SW"; break;
+    case ESP_RST_PANIC:    rmsg = "PANIC"; break;
+    case ESP_RST_WDT:      rmsg = "WDT"; break;
+    default:               rmsg = "OTHER"; break;
+  }
+  snprintf(g_resetMsg, sizeof(g_resetMsg), "%s", rmsg);
+  g_pendingResetEvt = true;
+
+  // Garante que o sistema sempre inicia desligado após reboot
+  portENTER_CRITICAL(&g_mux);
+  g_systemOn = false;
+  portEXIT_CRITICAL(&g_mux);
+
+  // Carrega histórico persistido
+  hist_load();
 
   // SSR
   pinMode(PIN_SSR, OUTPUT);
@@ -310,6 +395,130 @@ void setup() {
   xTaskCreatePinnedToCore(taskRede,     "net",  8192, nullptr, 1, nullptr, 0);
 
   display_show_boot("RODANDO LOCAL", "NET EM BACKGND");
+}
+
+static bool time_is_valid() {
+  time_t now = time(nullptr);
+  // "válido" se já passou de 2020-01-01 (aprox)
+  return (now > 1577836800);
+}
+
+static uint32_t now_epoch_or_zero() {
+  if (!time_is_valid()) return 0;
+  return (uint32_t)time(nullptr);
+}
+
+static void hist_load() {
+  if (g_histMutex) xSemaphoreTake(g_histMutex, portMAX_DELAY);
+
+  g_prefs.begin("smarttemp", true);
+  g_histHead  = g_prefs.getUChar("h_head", 0);
+  g_histCount = g_prefs.getUChar("h_cnt",  0);
+  size_t n = g_prefs.getBytesLength("h_blob");
+
+  if (n == sizeof(g_hist)) {
+    g_prefs.getBytes("h_blob", g_hist, sizeof(g_hist));
+  } else {
+    memset(g_hist, 0, sizeof(g_hist));
+    g_histHead = 0;
+    g_histCount = 0;
+  }
+
+  g_prefs.end();
+
+  if (g_histHead > 23) g_histHead = 0;
+  if (g_histCount > 24) g_histCount = 24;
+
+  if (g_histMutex) xSemaphoreGive(g_histMutex);
+}
+
+static void hist_save() {
+  // Observação: hist_save grava flash (NVS).
+  // Para manter simples, não trava o mutex aqui porque os valores já foram atualizados
+  // com mutex em hist_add_point(). Se preferir, pode travar aqui também.
+
+  g_prefs.begin("smarttemp", false);
+  g_prefs.putUChar("h_head", g_histHead);
+  g_prefs.putUChar("h_cnt",  g_histCount);
+  g_prefs.putBytes("h_blob", g_hist, sizeof(g_hist));
+  g_prefs.end();
+}
+
+static void hist_add_point(float tempC) {
+  if (g_histMutex) xSemaphoreTake(g_histMutex, portMAX_DELAY);
+
+  HistPoint p;
+  p.ts   = now_epoch_or_zero();
+  p.temp = tempC;
+
+  g_hist[g_histHead] = p;
+  g_histHead = (uint8_t)((g_histHead + 1) % 24);
+  if (g_histCount < 24) g_histCount++;
+
+  if (g_histMutex) xSemaphoreGive(g_histMutex);
+
+  hist_save();
+}
+
+// 1 ponto por hora (e só se temp válida)
+static void hist_maybe_store(uint32_t nowMs, bool tempValid, float tempC) {
+  if (!tempValid) return;
+
+  if (g_histLastStoreMs == 0) {
+    g_histLastStoreMs = nowMs;
+    hist_add_point(tempC);
+    return;
+  }
+
+  if ((nowMs - g_histLastStoreMs) >= 3600000UL) { // 1h
+    g_histLastStoreMs = nowMs;
+    hist_add_point(tempC);
+  }
+}
+
+// envia em chunks no formato do app
+static void hist_publish_all() {
+  // copia snapshot do ring com mutex (evita race)
+  HistPoint ordered[24];
+  uint8_t n = 0;
+
+  if (g_histMutex) xSemaphoreTake(g_histMutex, portMAX_DELAY);
+
+  n = g_histCount;
+  uint8_t start = (g_histCount < 24) ? 0 : g_histHead;
+  for (uint8_t i = 0; i < n; i++) {
+    uint8_t idx = (uint8_t)((start + i) % 24);
+    ordered[i] = g_hist[idx];
+  }
+
+  if (g_histMutex) xSemaphoreGive(g_histMutex);
+
+  const uint8_t CHUNK_SZ = 8;
+  uint8_t total = (n + CHUNK_SZ - 1) / CHUNK_SZ;
+  if (total == 0) total = 1;
+
+  for (uint8_t seq = 0; seq < total; seq++) {
+    StaticJsonDocument<768> doc;
+    doc["id"] = CTRL_ID;
+    doc["seq"] = seq;
+    doc["total"] = total;
+
+    JsonArray points = doc.createNestedArray("points");
+    uint8_t from = seq * CHUNK_SZ;
+    uint8_t to   = min<uint8_t>(n, from + CHUNK_SZ);
+
+    for (uint8_t i = from; i < to; i++) {
+      JsonArray pt = points.createNestedArray();
+      pt.add(ordered[i].ts);   // pode ser 0
+      pt.add(ordered[i].temp);
+    }
+
+    char out[768];
+    size_t len = serializeJson(doc, out, sizeof(out));
+    mqtt_publish_hist(out, len, false);
+
+    vTaskDelay(pdMS_TO_TICKS(30)); // evita burst muito rápido
+  }
 }
 
 void loop() {

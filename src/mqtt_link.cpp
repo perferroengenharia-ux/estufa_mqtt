@@ -17,7 +17,7 @@ static unsigned long lastTry = 0;
 static bool lastConnected = false;
 static bool justConnectedFlag = false;
 
-static char t_state[128], t_cmd[128], t_evt[128], t_lwt[128];
+static char t_state[128], t_cmd[128], t_evt[128], t_lwt[128], t_hist[128];
 static char clientId[64];
 
 static void build_topics() {
@@ -25,6 +25,7 @@ static void build_topics() {
   topic_cmd  (t_cmd,   sizeof(t_cmd),   CTRL_ID);
   topic_evt  (t_evt,   sizeof(t_evt),   CTRL_ID);
   topic_lwt  (t_lwt,   sizeof(t_lwt),   CTRL_ID);
+  topic_hist (t_hist,  sizeof(t_hist),  CTRL_ID);
 }
 
 static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
@@ -192,6 +193,23 @@ bool mqtt_publish_fault(const char* code, const char* msg) {
   StaticJsonDocument<256> doc;
   doc["type"] = "fault";
   doc["code"] = code ? code : "";
+  doc["msg"]  = msg ? msg : "";
+
+  char out[256];
+  size_t n = serializeJson(doc, out, sizeof(out));
+  return mqtt.publish(t_evt, (const uint8_t*)out, (unsigned int)n, false);
+}
+
+bool mqtt_publish_hist(const char* payload, size_t len, bool retained) {
+  if (!mqtt.connected()) return false;
+  return mqtt.publish(t_hist, (const uint8_t*)payload, (unsigned int)len, retained);
+}
+
+bool mqtt_publish_reset(const char* msg) {
+  if (!mqtt.connected()) return false;
+
+  StaticJsonDocument<256> doc;
+  doc["type"] = "RESET";
   doc["msg"]  = msg ? msg : "";
 
   char out[256];

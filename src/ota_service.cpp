@@ -4,6 +4,7 @@
 #include <WiFiClientSecure.h>
 #include <Update.h>
 #include <ArduinoJson.h>
+#include "mqtt_link.h"
 
 struct OtaArgs {
   String url;
@@ -90,7 +91,7 @@ static void ota_task(void* pv) {
   uint8_t buf[1024];
   int lastPct = -1;
 
-  while (http.connected()) {
+  while (http.connected() || stream->available()) {
     size_t avail = stream->available();
     if (!avail) { delay(1); continue; }
 

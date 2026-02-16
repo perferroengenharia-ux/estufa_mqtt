@@ -96,6 +96,17 @@ static float clampf(float x, float lo, float hi) {
 static void on_mqtt_cmd(const MqttCommand& c) {
   // NÃO zere potência/sistema por falta de internet.
   // Só altera quando recebe comando válido.
+//===============================================================================
+  Serial.printf("[CMD] cmd=%s id=%s src=%s hasStr=%d hasNum=%d hasBool=%d\n",
+              c.cmd, c.msgId, c.src, c.hasStr, c.hasNum, c.hasBool);
+
+  if (c.hasStr) {
+    Serial.printf("[CMD] url=%s\n", c.sVal);
+  }
+  if (c.hasReboot) {
+    Serial.printf("[CMD] reboot=%d\n", (int)c.reboot);
+  }
+  //===============================================================================
 
   if (strcmp(c.cmd, "set_on") == 0 && c.hasBool) {
     portENTER_CRITICAL(&g_mux);
@@ -152,6 +163,7 @@ static void on_mqtt_cmd(const MqttCommand& c) {
   }
 
     if (strcmp(c.cmd, "ota_url") == 0 && c.hasStr) {
+    Serial.println("[OTA] comando ota_url recebido, iniciando...");
     mqtt_publish_ack(c.msgId, true);
 
     bool reboot = true;
@@ -393,7 +405,7 @@ void setup() {
   buttons_begin(PIN_BTN_ONOFF, PIN_BTN_UP, PIN_BTN_DOWN);
 
   display_begin(LCD_ADDR, LCD_COLS, LCD_ROWS);
-  display_show_boot("ESTUFA CAAP", CTRL_ID);
+  display_show_boot("SMARTEMP", CTRL_ID);
 
   sensor_begin(PIN_DS18B20, 10);
   delay(800);

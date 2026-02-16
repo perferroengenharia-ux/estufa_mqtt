@@ -68,13 +68,15 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     // ===== NOVO: url (string) para OTA =====
   c.hasStr = false;
   c.sVal[0] = '\0';
-  if (doc.containsKey("url") && doc["url"].is<const char*>()) {
-    const char* u = doc["url"];
+// Se value vier como string, use como URL (compatibilidade com dashboards)
+  if (!c.hasStr && doc.containsKey("value") && doc["value"].is<const char*>()) {
+    const char* u = doc["value"];
     if (u && u[0]) {
       c.hasStr = true;
       strlcpy(c.sVal, u, sizeof(c.sVal));
     }
   }
+
 
   // ===== NOVO: reboot (bool) opcional =====
   c.hasReboot = false;

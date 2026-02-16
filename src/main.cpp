@@ -14,6 +14,9 @@
 #include <esp_system.h>
 #include <ArduinoJson.h>
 
+#include "ota_service.h"
+
+
 // ======= PINOS =======
 static const uint8_t PIN_DS18B20   = 4;
 static const uint8_t PIN_SSR       = 26; // BC548 -> SSR
@@ -145,6 +148,19 @@ static void on_mqtt_cmd(const MqttCommand& c) {
     // ACK primeiro (opcional) e responde com histórico
     mqtt_publish_ack(c.msgId, true);
     hist_publish_all();
+    return;
+  }
+
+    if (strcmp(c.cmd, "ota_url") == 0 && c.hasStr) {
+    mqtt_publish_ack(c.msgId, true);
+
+    bool reboot = true;
+    if (c.hasReboot) reboot = c.reboot;
+
+    // inicia OTA em background
+    if (!ota_start_url(c.sVal, reboot)) {
+      mqtt_publish_ack(c.msgId, false, "falha ao iniciar OTA");
+    }
     return;
   }
 
@@ -377,7 +393,7 @@ void setup() {
   buttons_begin(PIN_BTN_ONOFF, PIN_BTN_UP, PIN_BTN_DOWN);
 
   display_begin(LCD_ADDR, LCD_COLS, LCD_ROWS);
-  display_show_boot("ESTUFA MQTT", CTRL_ID);
+  display_show_boot("ESTUFA CAAP", CTRL_ID);
 
   sensor_begin(PIN_DS18B20, 10);
   delay(800);

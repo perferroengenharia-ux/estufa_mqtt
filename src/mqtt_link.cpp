@@ -65,6 +65,25 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
+    // ===== NOVO: url (string) para OTA =====
+  c.hasStr = false;
+  c.sVal[0] = '\0';
+  if (doc.containsKey("url") && doc["url"].is<const char*>()) {
+    const char* u = doc["url"];
+    if (u && u[0]) {
+      c.hasStr = true;
+      strlcpy(c.sVal, u, sizeof(c.sVal));
+    }
+  }
+
+  // ===== NOVO: reboot (bool) opcional =====
+  c.hasReboot = false;
+  c.reboot = true; // default
+  if (doc.containsKey("reboot") && doc["reboot"].is<bool>()) {
+    c.hasReboot = true;
+    c.reboot = doc["reboot"].as<bool>();
+  }
+
   if (g_handler) g_handler(c);
 }
 
@@ -203,6 +222,11 @@ bool mqtt_publish_fault(const char* code, const char* msg) {
 bool mqtt_publish_hist(const char* payload, size_t len, bool retained) {
   if (!mqtt.connected()) return false;
   return mqtt.publish(t_hist, (const uint8_t*)payload, (unsigned int)len, retained);
+}
+
+bool mqtt_publish_evt(const char* payload, size_t len) {
+  if (!mqtt.connected()) return false;
+  return mqtt.publish(t_evt, (const uint8_t*)payload, (unsigned int)len, false);
 }
 
 bool mqtt_publish_reset(const char* msg) {

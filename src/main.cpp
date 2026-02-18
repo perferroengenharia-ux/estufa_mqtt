@@ -169,19 +169,23 @@ static void on_mqtt_cmd(const MqttCommand& c) {
     return;
   }
 
-    if (strcmp(c.cmd, "ota_url") == 0 && c.hasStr) {
+  // ======= OTA URL (ALTERAÇÃO MÍNIMA AQUI) =======
+  if (strcmp(c.cmd, "ota_url") == 0 && c.hasStr) {
     Serial.println("[OTA] comando ota_url recebido, iniciando...");
-    mqtt_publish_ack(c.msgId, true);
 
     bool reboot = true;
     if (c.hasReboot) reboot = c.reboot;
 
-    // inicia OTA em background
-    if (!ota_start_url(c.sVal, reboot)) {
+    // Inicia OTA em background.
+    // Só responde ACK OK se realmente conseguiu disparar a task do OTA.
+    if (ota_start_url(c.sVal, reboot)) {
+      mqtt_publish_ack(c.msgId, true);
+    } else {
       mqtt_publish_ack(c.msgId, false, "falha ao iniciar OTA");
     }
     return;
   }
+  // ==============================================
 
   mqtt_publish_ack(c.msgId, false, "cmd invalido");
 }
@@ -206,7 +210,7 @@ static void taskControle(void* pv) {
     }
 
     // Se ligou, reconhece o alerta de reset
-  if (g_systemOn) g_alertReset = false;
+    if (g_systemOn) g_alertReset = false;
 
     if (buttons_up_event() != EV_NONE) {
       portENTER_CRITICAL(&g_mux);
@@ -233,7 +237,6 @@ static void taskControle(void* pv) {
       g_sensorFailSinceMs = 0;
       g_alertSensor = false;
     }
-
 
     // Histórico 24h (1 ponto/hora)
     hist_maybe_store(now, tempValid, tempC);
@@ -282,14 +285,13 @@ static void taskControle(void* pv) {
       portEXIT_CRITICAL(&g_mux);
 
       // PRIORIDADE: RESET > SENSOR > NORMAL
-    if (g_alertReset) {
-      display_set_alert(true, "!!! RESET/ENERGIA", "LIGUE NOVAMENTE!", true);
-    } else if (g_alertSensor) {
-      display_set_alert(true, "ERRO SENSOR", "DS18B20 FALHA", false);
-    } else {
-      display_set_alert(false, "", "", false);
-    }
-
+      if (g_alertReset) {
+        display_set_alert(true, "!!! RESET/ENERGIA", "LIGUE NOVAMENTE!", true);
+      } else if (g_alertSensor) {
+        display_set_alert(true, "ERRO SENSOR", "DS18B20 FALHA", false);
+      } else {
+        display_set_alert(false, "", "", false);
+      }
 
       display_update(localOn, localSp, tempValid, tempC, heating);
     }
@@ -437,10 +439,10 @@ void setup() {
   buttons_begin(PIN_BTN_ONOFF, PIN_BTN_UP, PIN_BTN_DOWN);
 
   display_begin(LCD_ADDR, LCD_COLS, LCD_ROWS);
-  display_show_boot("SMARTEMP CAAP v1.0", CTRL_ID);
+  display_show_boot("PERFERRO CONTROL", CTRL_ID);
 
   sensor_begin(PIN_DS18B20, 10);
-  delay(800);
+  delay(3000);
   sensor_update(millis());
 
   controlador_begin(meuControle, sensor_get_c());

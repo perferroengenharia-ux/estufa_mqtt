@@ -1,7 +1,8 @@
 #include "ota_service.h"
 
-#include <HTTPClient.h>
+#include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <Update.h>
 #include <ArduinoJson.h>
 
@@ -13,8 +14,19 @@ struct OtaArgs {
 };
 
 static volatile bool g_otaRunning = false;
+static bool g_pausedMqttForOta = false;
 
 static void ota_evt(const char* stage, int pct = -1, const char* msg = nullptr) {
+  // Serial sempre (importante quando MQTT estiver pausado)
+  Serial.print("[OTA] ");
+  Serial.print(stage);
+  if (pct >= 0) { Serial.print(" "); Serial.print(pct); Serial.print("%"); }
+  if (msg && msg[0]) { Serial.print(" - "); Serial.print(msg); }
+  Serial.println();
+
+  // Publica EVT só se MQTT estiver conectado
+  if (!mqtt_is_connected()) return;
+
   StaticJsonDocument<256> doc;
   doc["type"]  = "OTA";
   doc["stage"] = stage;
@@ -28,151 +40,141 @@ static void ota_evt(const char* stage, int pct = -1, const char* msg = nullptr) 
 
 static void ota_task(void* pv) {
   OtaArgs* a = reinterpret_cast<OtaArgs*>(pv);
-
   g_otaRunning = true;
-  ota_evt("START", 0, a->url.c_str());
+
+  ota_evt("START", 0);
+
+  if (WiFi.status() != WL_CONNECTED) {
+    ota_evt("FAIL", -1, "WiFi desconectado");
+    g_otaRunning = false;
+    delete a;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  // ===== FIX PRINCIPAL =====
+  // Pausa MQTT/TLS durante o OTA para evitar conflito de duas conexões TLS
+  // (MQTT 8883 + HTTPS GitHub) que causa SSL internal error (-27648).
+  g_pausedMqttForOta = false;
+  if (!mqtt_is_paused()) {
+    mqtt_pause(true);
+    g_pausedMqttForOta = true;
+    delay(200);
+  }
+
+  Serial.printf("[OTA] free heap=%u\n", (unsigned)ESP.getFreeHeap());
+  Serial.print("[OTA] URL: ");
+  Serial.println(a->url);
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(30);
+  client.setTimeout(15000);
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setReuse(false);
   http.setTimeout(15000);
-  http.useHTTP10(true);
 
-  const char* url = a->url.c_str();
-  const bool isHttps = (strncmp(url, "https://", 8) == 0);
-
-  bool ok = false;
-  bool updateStarted = false;
-
-  // Mantém o client vivo até o fim
-  WiFiClient* client = nullptr;
-  WiFiClientSecure* tls = nullptr;
-
-  if (isHttps) {
-    tls = new WiFiClientSecure();
-    tls->setInsecure();     // sem segurança real
-    tls->setTimeout(15000);
-    client = tls;
-    ok = http.begin(*tls, url);
-  } else {
-    client = new WiFiClient();
-    ok = http.begin(*client, url);
-  }
-
-  if (!ok) {
+  if (!http.begin(client, a->url)) {
     ota_evt("FAIL", -1, "http.begin falhou");
-    http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
+    if (g_pausedMqttForOta) mqtt_pause(false);
+    g_pausedMqttForOta = false;
     g_otaRunning = false;
     delete a;
     vTaskDelete(nullptr);
     return;
   }
 
-  http.addHeader("User-Agent", "PerferroSmartTemp/1.0");
+  int httpCode = http.GET();
 
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    char m[96];
-    snprintf(m, sizeof(m), "HTTP %d", code);
-    ota_evt("FAIL", -1, m);
-
+  // Quando TLS falha, httpCode pode ser <= 0
+  if (httpCode <= 0) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "GET falhou (%d)", httpCode);
+    ota_evt("FAIL", -1, msg);
     http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
-
+    if (g_pausedMqttForOta) mqtt_pause(false);
+    g_pausedMqttForOta = false;
     g_otaRunning = false;
     delete a;
     vTaskDelete(nullptr);
     return;
   }
 
-  int len = http.getSize(); // pode ser -1 (chunked)
-  if (len == 0) {
-    ota_evt("FAIL", -1, "size=0");
+  if (httpCode != HTTP_CODE_OK) {
+    char msg[32];
+    snprintf(msg, sizeof(msg), "HTTP %d", httpCode);
+    ota_evt("FAIL", -1, msg);
     http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
-
+    if (g_pausedMqttForOta) mqtt_pause(false);
+    g_pausedMqttForOta = false;
     g_otaRunning = false;
     delete a;
     vTaskDelete(nullptr);
     return;
   }
 
-  if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
-    ota_evt("FAIL", -1, "Update.begin falhou");
-    http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
+  int contentLength = http.getSize();
 
+  if (!Update.begin(contentLength > 0 ? contentLength : UPDATE_SIZE_UNKNOWN)) {
+    ota_evt("FAIL", -1, "Update.begin erro");
+    http.end();
+    if (g_pausedMqttForOta) mqtt_pause(false);
+    g_pausedMqttForOta = false;
     g_otaRunning = false;
     delete a;
     vTaskDelete(nullptr);
     return;
   }
-  updateStarted = true;
 
   WiFiClient* stream = http.getStreamPtr();
-  if (!stream) {
-    ota_evt("FAIL", -1, "sem stream");
-    Update.end();
-    http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
 
-    g_otaRunning = false;
-    delete a;
-    vTaskDelete(nullptr);
-    return;
-  }
+  uint8_t buffer[1024];
+  size_t written = 0;
+  int lastPct = -1;
+  uint32_t lastActivity = millis();
 
-  stream->setTimeout(15000);
+  while (http.connected()) {
+    size_t avail = stream->available();
 
-  ota_evt("DOWNLOADING", 0, nullptr);
+    if (avail) {
+      int n = stream->readBytes(buffer, (avail > sizeof(buffer)) ? sizeof(buffer) : avail);
+      if (n > 0) {
+        Update.write(buffer, n);
+        written += (size_t)n;
+        lastActivity = millis();
 
-  size_t written = Update.writeStream(*stream);
-  if (written == 0) {
-    ota_evt("FAIL", -1, "writeStream=0");
-    Update.end();
-    http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
-
-    g_otaRunning = false;
-    delete a;
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  if (len > 0) {
-    int pct = (int)((written * 100ULL) / (unsigned long long)len);
-    if (pct > 100) pct = 100;
-    ota_evt("DOWNLOADING", pct, nullptr);
-
-    if ((int)written != len) {
-      char m[96];
-      snprintf(m, sizeof(m), "incompleto %u/%d", (unsigned)written, len);
-      ota_evt("FAIL", -1, m);
-      Update.end();
-      http.end();
-      if (tls) delete tls;
-      else if (client) delete client;
-
-      g_otaRunning = false;
-      delete a;
-      vTaskDelete(nullptr);
-      return;
+        if (contentLength > 0) {
+          int pct = (int)((written * 100UL) / (unsigned long)contentLength);
+          if (pct != lastPct) {
+            lastPct = pct;
+            ota_evt("DOWNLOADING", pct);
+          }
+          if ((int)written >= contentLength) break;
+        }
+      }
+    } else {
+      // timeout de stream (evita loop infinito em conexão ruim)
+      if (millis() - lastActivity > 20000) {
+        ota_evt("FAIL", -1, "timeout stream");
+        Update.abort();
+        http.end();
+        if (g_pausedMqttForOta) mqtt_pause(false);
+        g_pausedMqttForOta = false;
+        g_otaRunning = false;
+        delete a;
+        vTaskDelete(nullptr);
+        return;
+      }
+      vTaskDelay(5);
     }
   }
 
   if (!Update.end(true)) {
     ota_evt("FAIL", -1, Update.errorString());
     http.end();
-    if (tls) delete tls;
-    else if (client) delete client;
-
+    if (g_pausedMqttForOta) mqtt_pause(false);
+    g_pausedMqttForOta = false;
     g_otaRunning = false;
     delete a;
     vTaskDelete(nullptr);
@@ -180,18 +182,21 @@ static void ota_task(void* pv) {
   }
 
   http.end();
-  if (tls) delete tls;
-  else if (client) delete client;
-
-  ota_evt("DONE", 100, nullptr);
+  ota_evt("DONE", 100);
 
   bool reboot = a->reboot;
   delete a;
 
   g_otaRunning = false;
 
+  // Se não for reiniciar, retoma MQTT
+  if (!reboot && g_pausedMqttForOta) {
+    mqtt_pause(false);
+  }
+  g_pausedMqttForOta = false;
+
   if (reboot) {
-    delay(800);
+    delay(500);
     ESP.restart();
   }
 
@@ -204,28 +209,26 @@ bool ota_start_url(const char* url, bool reboot_after) {
 
   String u(url);
 
-  // barreira “anti-erro” (não segurança)
-  if (!(u.startsWith("http://") || u.startsWith("https://"))) {
-    ota_evt("FAIL", -1, "URL deve começar com http/https");
+  if (!u.startsWith("http")) {
+    ota_evt("FAIL", -1, "URL invalida");
     return false;
   }
+
   if (!u.endsWith(".bin")) {
-    ota_evt("FAIL", -1, "URL nao termina com .bin");
+    ota_evt("FAIL", -1, "Nao termina .bin");
     return false;
   }
 
   auto* a = new OtaArgs{u, reboot_after};
 
-  BaseType_t ok = xTaskCreate(
-    ota_task,
-    "ota",
-    12288, // <<< mais stack
-    (void*)a,
-    1,
-    nullptr
-  );
-
-  if (ok != pdPASS) {
+  if (xTaskCreate(
+        ota_task,
+        "ota",
+        8192,
+        a,
+        1,
+        nullptr
+      ) != pdPASS) {
     delete a;
     return false;
   }

@@ -17,6 +17,9 @@ static unsigned long lastTry = 0;
 static bool lastConnected = false;
 static bool justConnectedFlag = false;
 
+// Pausa MQTT/TLS durante OTA (evita conflito de duas conexões TLS simultâneas)
+static bool g_paused = false;
+
 static char t_state[128], t_cmd[128], t_evt[128], t_lwt[128], t_hist[128];
 static char clientId[64];
 
@@ -68,28 +71,25 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
-    // ===== NOVO: url (string) para OTA =====
-// ===== URL OTA (robusto) =====
-c.hasStr = false;
-c.sVal[0] = '\0';
+  // ===== URL OTA (robusto) =====
+  c.hasStr = false;
+  c.sVal[0] = '\0';
 
-// pega "url" mesmo se não for exatamente const char*
-const char* u = doc["url"] | "";
-if (u && u[0]) {
-  c.hasStr = true;
-  strlcpy(c.sVal, u, sizeof(c.sVal));
-} else {
-  // fallback: se alguém mandar em value como string
-  const char* v = doc["value"] | "";
-  if (v && v[0]) {
+  // pega "url" mesmo se não for exatamente const char*
+  const char* u = doc["url"] | "";
+  if (u && u[0]) {
     c.hasStr = true;
-    strlcpy(c.sVal, v, sizeof(c.sVal));
+    strlcpy(c.sVal, u, sizeof(c.sVal));
+  } else {
+    // fallback: se alguém mandar em value como string
+    const char* v = doc["value"] | "";
+    if (v && v[0]) {
+      c.hasStr = true;
+      strlcpy(c.sVal, v, sizeof(c.sVal));
+    }
   }
-}
 
-
-
-  // ===== NOVO: reboot (bool) opcional =====
+  // ===== reboot (bool) opcional =====
   c.hasReboot = false;
   c.reboot = true; // default
   if (doc.containsKey("reboot") && doc["reboot"].is<bool>()) {
@@ -104,7 +104,22 @@ void mqtt_set_cmd_handler(MqttCmdHandler h) {
   g_handler = h;
 }
 
+void mqtt_pause(bool paused) {
+  g_paused = paused;
+  if (paused) {
+    if (mqtt.connected()) mqtt.disconnect();
+    net.stop(); // fecha socket/TLS e libera recursos
+    lastConnected = false;
+    justConnectedFlag = false;
+  }
+}
+
+bool mqtt_is_paused() {
+  return g_paused;
+}
+
 static bool mqtt_connect_now() {
+  if (g_paused) return false;
   if (!wifi_is_connected()) return false;
 
   build_topics();
@@ -120,7 +135,6 @@ static bool mqtt_connect_now() {
   net.setInsecure(); // mais fácil (depois podemos usar CA)
   net.setTimeout(2);
   mqtt.setSocketTimeout(2);
-
 #endif
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -146,11 +160,14 @@ void mqtt_begin() {
   lastTry = 0;
   lastConnected = false;
   justConnectedFlag = false;
+  g_paused = false;
   build_topics();
 }
 
 void mqtt_update() {
   justConnectedFlag = false;
+
+  if (g_paused) return;
 
   if (mqtt.connected()) {
     mqtt.loop();

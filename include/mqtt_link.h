@@ -57,3 +57,7 @@ bool mqtt_publish_evt(const char* payload, size_t len);
 
 // Mantém wrapper de reset (usa evt)
 bool mqtt_publish_reset(const char* msg);
+
+// ===== OTA helper: pausa MQTT/TLS para liberar heap durante HTTPS OTA =====
+void mqtt_pause(bool paused);
+bool mqtt_is_paused();

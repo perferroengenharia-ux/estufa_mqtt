@@ -16,6 +16,9 @@
 
 #include "ota_service.h"
 
+#include "log_mirror.h"
+
+
 
 // ======= PINOS =======
 static const uint8_t PIN_DS18B20   = 4;
@@ -171,7 +174,7 @@ static void on_mqtt_cmd(const MqttCommand& c) {
 
   // ======= OTA URL (ALTERAÇÃO MÍNIMA AQUI) =======
   if (strcmp(c.cmd, "ota_url") == 0 && c.hasStr) {
-    Serial.println("[OTA] comando ota_url recebido, iniciando...");
+    log_mirror_printf(LOG_I, "[OTA] comando ota_url recebido, iniciando...");
 
     bool reboot = true;
     if (c.hasReboot) reboot = c.reboot;
@@ -186,6 +189,19 @@ static void on_mqtt_cmd(const MqttCommand& c) {
     return;
   }
   // ==============================================
+
+  if (strcmp(c.cmd, "log_set") == 0 && c.hasBool) {
+  log_mirror_set_enabled(c.bVal);
+  mqtt_publish_ack(c.msgId, true);
+  return;
+}
+
+if (strcmp(c.cmd, "log_level") == 0 && c.hasStr) {
+  LogLvl lvl = log_parse_level_char(c.sVal); // aceita "D/I/W/E"
+  log_mirror_set_level(lvl);
+  mqtt_publish_ack(c.msgId, true);
+  return;
+}
 
   mqtt_publish_ack(c.msgId, false, "cmd invalido");
 }
@@ -310,20 +326,10 @@ static void taskControle(void* pv) {
       float u_pct = meuControle.u_calculado;
       if (!localOn || !tempValid) u_pct = 0.0f;
 
-      Serial.print("ID=");
-      Serial.print(CTRL_ID);
-      Serial.print(" T=");
-      Serial.print(tempC, 2);
-      Serial.print("C SP=");
-      Serial.print(localSp, 2);
-      Serial.print(" ON=");
-      Serial.print(localOn ? 1 : 0);
-      Serial.print(" u=");
-      Serial.print(u_pct, 2);
-      Serial.print("% a1=");
-      Serial.print(meuControle.a1, 6);
-      Serial.print(" b0=");
-      Serial.println(meuControle.b0, 6);
+      log_mirror_printf(LOG_I,
+      "ID=%s T=%.2fC SP=%.2f ON=%d u=%.2f%% a1=%.6f b0=%.6f",
+      CTRL_ID, tempC, localSp, localOn ? 1 : 0, u_pct, meuControle.a1, meuControle.b0);
+
     }
 
     vTaskDelay(pdMS_TO_TICKS(SSR_TICK_MS)); // 10ms
@@ -342,6 +348,9 @@ static void taskRede(void* pv) {
 
     wifi_update();
     mqtt_update();
+
+    mqtt_update();
+    log_mirror_poll(); // publica logs enfileirados via MQTT (somente aqui!)
 
     const bool nowConn = mqtt_is_connected();
     if (nowConn && !lastConn) {
@@ -403,6 +412,8 @@ static void taskRede(void* pv) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  log_mirror_begin(true); // true = captura logs do core (ssl_client.cpp etc)
 
   // Mutex do histórico
   g_histMutex = xSemaphoreCreateMutex();

@@ -8,6 +8,9 @@
 #include "protocol.h"
 #include "wifi_link.h"
 
+#include "log_mirror.h"
+
+
 static WiFiClientSecure net;
 static PubSubClient mqtt(net);
 
@@ -41,8 +44,8 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   memcpy(buf, payload, length);
   buf[length] = '\0';
 
-  Serial.print("[CMD RAW] ");
-  Serial.println(buf);
+log_mirror_printf(LOG_I, "[CMD RAW] %s", buf);
+
 
   StaticJsonDocument<512> doc;
   DeserializationError err = deserializeJson(doc, buf);

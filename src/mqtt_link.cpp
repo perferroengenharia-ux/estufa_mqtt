@@ -38,6 +38,9 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   memcpy(buf, payload, length);
   buf[length] = '\0';
 
+  Serial.print("[CMD RAW] ");
+  Serial.println(buf);
+
   StaticJsonDocument<512> doc;
   DeserializationError err = deserializeJson(doc, buf);
   if (err) return;
@@ -66,16 +69,24 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   }
 
     // ===== NOVO: url (string) para OTA =====
-  c.hasStr = false;
-  c.sVal[0] = '\0';
-// Se value vier como string, use como URL (compatibilidade com dashboards)
-  if (!c.hasStr && doc.containsKey("value") && doc["value"].is<const char*>()) {
-    const char* u = doc["value"];
-    if (u && u[0]) {
-      c.hasStr = true;
-      strlcpy(c.sVal, u, sizeof(c.sVal));
-    }
+// ===== URL OTA (robusto) =====
+c.hasStr = false;
+c.sVal[0] = '\0';
+
+// pega "url" mesmo se não for exatamente const char*
+const char* u = doc["url"] | "";
+if (u && u[0]) {
+  c.hasStr = true;
+  strlcpy(c.sVal, u, sizeof(c.sVal));
+} else {
+  // fallback: se alguém mandar em value como string
+  const char* v = doc["value"] | "";
+  if (v && v[0]) {
+    c.hasStr = true;
+    strlcpy(c.sVal, v, sizeof(c.sVal));
   }
+}
+
 
 
   // ===== NOVO: reboot (bool) opcional =====

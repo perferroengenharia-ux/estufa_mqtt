@@ -6,3 +6,6 @@ void display_show_boot(const char* line1, const char* line2);
 
 // Adicionado o parâmetro 'heaterOn' ao final
 void display_update(bool systemOn, float setpoint, bool tempValid, float tempC, bool heaterOn);
+
+// NOVO: alerta com prioridade (sobrepõe display_update)
+void display_set_alert(bool enabled, const char* line1, const char* line2, bool blink);

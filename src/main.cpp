@@ -39,6 +39,12 @@ static const float SP_STEP = 0.5f;
 static const uint32_t CONTROL_UPDATE_MS = 1000;  // controlador 1 Hz
 static const uint32_t LCD_UPDATE_MS     = 150;   // LCD
 static const uint32_t SSR_TICK_MS       = 10;    // chamada frequente do apply_output
+
+// ALERTAS LCD
+static volatile bool g_alertReset = false;     // queda energia / reset
+static volatile bool g_alertSensor = false;    // sensor falhando
+static uint32_t g_sensorFailSinceMs = 0;
+
 static const uint32_t SERIAL_LOG_MS     = 1000;
 
 // ======= Globais do controle =======
@@ -111,6 +117,7 @@ static void on_mqtt_cmd(const MqttCommand& c) {
   if (strcmp(c.cmd, "set_on") == 0 && c.hasBool) {
     portENTER_CRITICAL(&g_mux);
     g_systemOn = c.bVal;
+    if (c.bVal) g_alertReset = false;
     if (!g_systemOn) meuControle.u_calculado = 0.0f; // desliga na hora se mandou OFF
     portEXIT_CRITICAL(&g_mux);
 
@@ -198,6 +205,9 @@ static void taskControle(void* pv) {
       portEXIT_CRITICAL(&g_mux);
     }
 
+    // Se ligou, reconhece o alerta de reset
+  if (g_systemOn) g_alertReset = false;
+
     if (buttons_up_event() != EV_NONE) {
       portENTER_CRITICAL(&g_mux);
       g_setpoint = clampf((float)g_setpoint + SP_STEP, SP_MIN, SP_MAX);
@@ -214,6 +224,16 @@ static void taskControle(void* pv) {
     sensor_update(now);
     const bool  tempValid = sensor_has_value();
     const float tempC     = sensor_get_c();
+
+    // Falha de sensor: só considera erro se ficar inválido por > 3s
+    if (!tempValid) {
+      if (g_sensorFailSinceMs == 0) g_sensorFailSinceMs = now;
+      if ((now - g_sensorFailSinceMs) > 3000) g_alertSensor = true;
+    } else {
+      g_sensorFailSinceMs = 0;
+      g_alertSensor = false;
+    }
+
 
     // Histórico 24h (1 ponto/hora)
     hist_maybe_store(now, tempValid, tempC);
@@ -260,6 +280,16 @@ static void taskControle(void* pv) {
       localOn = g_systemOn;
       localSp = g_setpoint;
       portEXIT_CRITICAL(&g_mux);
+
+      // PRIORIDADE: RESET > SENSOR > NORMAL
+    if (g_alertReset) {
+      display_set_alert(true, "!!! RESET/ENERGIA", "LIGUE NOVAMENTE!", true);
+    } else if (g_alertSensor) {
+      display_set_alert(true, "ERRO SENSOR", "DS18B20 FALHA", false);
+    } else {
+      display_set_alert(false, "", "", false);
+    }
+
 
       display_update(localOn, localSp, tempValid, tempC, heating);
     }
@@ -388,6 +418,8 @@ void setup() {
   }
   snprintf(g_resetMsg, sizeof(g_resetMsg), "%s", rmsg);
   g_pendingResetEvt = true;
+  // Mostra urgente no LCD até o usuário ligar novamente
+  g_alertReset = true;
 
   // Garante que o sistema sempre inicia desligado após reboot
   portENTER_CRITICAL(&g_mux);
@@ -405,7 +437,7 @@ void setup() {
   buttons_begin(PIN_BTN_ONOFF, PIN_BTN_UP, PIN_BTN_DOWN);
 
   display_begin(LCD_ADDR, LCD_COLS, LCD_ROWS);
-  display_show_boot("SMARTEMP", CTRL_ID);
+  display_show_boot("SMARTEMP CAAP v1.0", CTRL_ID);
 
   sensor_begin(PIN_DS18B20, 10);
   delay(800);

@@ -302,7 +302,7 @@ static void taskControle(void* pv) {
 
       // PRIORIDADE: RESET > SENSOR > NORMAL
       if (g_alertReset) {
-        display_set_alert(true, "!!! RESET/ENERGIA", "LIGUE NOVAMENTE!", true);
+        display_set_alert(true, "!! RESET/ENERGIA", "LIGUE NOVAMENTE!", true);
       } else if (g_alertSensor) {
         display_set_alert(true, "ERRO SENSOR", "DS18B20 FALHA", false);
       } else {

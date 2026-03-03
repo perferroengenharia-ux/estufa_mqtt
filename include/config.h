@@ -2,7 +2,7 @@
 
 // ====== IDENTIDADE DO CONTROLADOR ======
 #ifndef CTRL_ID
-  #define CTRL_ID "ctrl01"     // troque em cada placa: ctrl01, ctrl02, ...
+  #define CTRL_ID "ctrl02"     // troque em cada placa: ctrl01, ctrl02, ...
 #endif
 
 // ====== WIFI ======

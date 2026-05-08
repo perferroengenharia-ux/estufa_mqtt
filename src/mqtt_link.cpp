@@ -17,6 +17,7 @@ static PubSubClient mqtt(net);
 static MqttCmdHandler g_handler = nullptr;
 
 static unsigned long lastTry = 0;
+static uint32_t reconnectDelayMs = MQTT_RECONNECT_MS;
 static bool lastConnected = false;
 static bool justConnectedFlag = false;
 
@@ -25,6 +26,13 @@ static bool g_paused = false;
 
 static char t_state[128], t_cmd[128], t_evt[128], t_lwt[128], t_hist[128];
 static char clientId[64];
+
+static uint32_t next_reconnect_delay(uint32_t currentMs) {
+  uint32_t next = currentMs * 2UL;
+  if (next < MQTT_RECONNECT_MS) next = MQTT_RECONNECT_MS;
+  if (next > 10000UL) next = 10000UL;
+  return next;
+}
 
 static void build_topics() {
   topic_state(t_state, sizeof(t_state), CTRL_ID);
@@ -39,7 +47,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, t_cmd) != 0) return;
 
   // copia payload p/ buffer terminando em \0
-  static char buf[512];
+  static char buf[1024];
   if (length >= sizeof(buf)) length = sizeof(buf) - 1;
   memcpy(buf, payload, length);
   buf[length] = '\0';
@@ -47,7 +55,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 log_mirror_printf(LOG_I, "[CMD RAW] %s", buf);
 
 
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<768> doc;
   DeserializationError err = deserializeJson(doc, buf);
   if (err) return;
 
@@ -55,13 +63,13 @@ log_mirror_printf(LOG_I, "[CMD RAW] %s", buf);
   memset(&c, 0, sizeof(c));
 
   const char* cmd = doc["cmd"] | "";
-  strncpy(c.cmd, cmd, sizeof(c.cmd) - 1);
+  strlcpy(c.cmd, cmd, sizeof(c.cmd));
 
   const char* mid = doc["id"] | "";
-  strncpy(c.msgId, mid, sizeof(c.msgId) - 1);
+  strlcpy(c.msgId, mid, sizeof(c.msgId));
 
   const char* src = doc["src"] | "";
-  strncpy(c.src, src, sizeof(c.src) - 1);
+  strlcpy(c.src, src, sizeof(c.src));
 
   // value pode ser bool ou número
   if (doc.containsKey("value")) {
@@ -89,6 +97,13 @@ log_mirror_printf(LOG_I, "[CMD RAW] %s", buf);
     if (v && v[0]) {
       c.hasStr = true;
       strlcpy(c.sVal, v, sizeof(c.sVal));
+    } else {
+      const char* lvl = doc["level"] | "";
+      if (!lvl || !lvl[0]) lvl = doc["lvl"] | "";
+      if (lvl && lvl[0]) {
+        c.hasStr = true;
+        strlcpy(c.sVal, lvl, sizeof(c.sVal));
+      }
     }
   }
 
@@ -114,6 +129,9 @@ void mqtt_pause(bool paused) {
     net.stop(); // fecha socket/TLS e libera recursos
     lastConnected = false;
     justConnectedFlag = false;
+  } else {
+    lastTry = 0;
+    reconnectDelayMs = MQTT_RECONNECT_MS;
   }
 }
 
@@ -126,6 +144,7 @@ static bool mqtt_connect_now() {
   if (!wifi_is_connected()) return false;
 
   build_topics();
+  net.stop();
 
   // clientId único
   uint64_t mac = ESP.getEfuseMac();
@@ -136,8 +155,7 @@ static bool mqtt_connect_now() {
 
 #if MQTT_TLS_INSECURE
   net.setInsecure(); // mais fácil (depois podemos usar CA)
-  net.setTimeout(2);
-  mqtt.setSocketTimeout(2);
+  mqtt.setSocketTimeout(4);
 #endif
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -148,19 +166,24 @@ static bool mqtt_connect_now() {
   // LWT offline retained
   const char* willMsg = "{\"online\":false}";
   bool ok = mqtt.connect(clientId, MQTT_USER, MQTT_PASS, t_lwt, 1, true, willMsg);
-  if (!ok) return false;
+  if (!ok) {
+    net.stop();
+    return false;
+  }
 
   // online retained
   mqtt.publish(t_lwt, "{\"online\":true}", true);
 
   // assina comandos
   mqtt.subscribe(t_cmd, 1);
+  log_mirror_printf(LOG_I, "[MQTT] conectado; escutando %s", t_cmd);
 
   return true;
 }
 
 void mqtt_begin() {
   lastTry = 0;
+  reconnectDelayMs = MQTT_RECONNECT_MS;
   lastConnected = false;
   justConnectedFlag = false;
   g_paused = false;
@@ -172,9 +195,16 @@ void mqtt_update() {
 
   if (g_paused) return;
 
+  if (!wifi_is_connected()) {
+    if (lastConnected) lastConnected = false;
+    reconnectDelayMs = MQTT_RECONNECT_MS;
+    return;
+  }
+
   if (mqtt.connected()) {
     mqtt.loop();
     lastConnected = true;
+    reconnectDelayMs = MQTT_RECONNECT_MS;
     return;
   }
 
@@ -182,15 +212,19 @@ void mqtt_update() {
   if (lastConnected) lastConnected = false;
 
   const unsigned long now = millis();
-  if (now - lastTry < MQTT_RECONNECT_MS) return;
+  if (now - lastTry < reconnectDelayMs) return;
   lastTry = now;
 
   if (mqtt_connect_now()) {
     justConnectedFlag = true;
+    reconnectDelayMs = MQTT_RECONNECT_MS;
+  } else {
+    reconnectDelayMs = next_reconnect_delay(reconnectDelayMs);
   }
 }
 
 bool mqtt_is_connected() {
+  if (g_paused) return false;
   return mqtt.connected();
 }
 
@@ -199,6 +233,7 @@ bool mqtt_just_connected() {
 }
 
 bool mqtt_publish_state(const MqttState& s) {
+  if (g_paused) return false;
   if (!mqtt.connected()) return false;
 
   StaticJsonDocument<512> doc;
@@ -226,6 +261,7 @@ bool mqtt_publish_state(const MqttState& s) {
 }
 
 bool mqtt_publish_ack(const char* msgId, bool ok, const char* msg) {
+  if (g_paused) return false;
   if (!mqtt.connected()) return false;
 
   StaticJsonDocument<256> doc;
@@ -240,6 +276,7 @@ bool mqtt_publish_ack(const char* msgId, bool ok, const char* msg) {
 }
 
 bool mqtt_publish_fault(const char* code, const char* msg) {
+  if (g_paused) return false;
   if (!mqtt.connected()) return false;
 
   StaticJsonDocument<256> doc;
@@ -253,16 +290,19 @@ bool mqtt_publish_fault(const char* code, const char* msg) {
 }
 
 bool mqtt_publish_hist(const char* payload, size_t len, bool retained) {
+  if (g_paused) return false;
   if (!mqtt.connected()) return false;
   return mqtt.publish(t_hist, (const uint8_t*)payload, (unsigned int)len, retained);
 }
 
 bool mqtt_publish_evt(const char* payload, size_t len) {
+  if (g_paused) return false;
   if (!mqtt.connected()) return false;
   return mqtt.publish(t_evt, (const uint8_t*)payload, (unsigned int)len, false);
 }
 
 bool mqtt_publish_reset(const char* msg) {
+  if (g_paused) return false;
   if (!mqtt.connected()) return false;
 
   StaticJsonDocument<256> doc;

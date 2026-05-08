@@ -32,8 +32,8 @@ struct MqttCommand {
   bool hasReboot;
   bool reboot;
 
-  char msgId[32];
-  char src[16];
+  char msgId[64];
+  char src[24];
 };
 
 typedef void (*MqttCmdHandler)(const MqttCommand& c);

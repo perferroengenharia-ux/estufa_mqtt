@@ -140,7 +140,17 @@ static void ota_task(void* pv) {
     if (avail) {
       int n = stream->readBytes(buffer, (avail > sizeof(buffer)) ? sizeof(buffer) : avail);
       if (n > 0) {
-        Update.write(buffer, n);
+        if (Update.write(buffer, n) != (size_t)n) {
+          ota_evt("FAIL", -1, Update.errorString());
+          Update.abort();
+          http.end();
+          if (g_pausedMqttForOta) mqtt_pause(false);
+          g_pausedMqttForOta = false;
+          g_otaRunning = false;
+          delete a;
+          vTaskDelete(nullptr);
+          return;
+        }
         written += (size_t)n;
         lastActivity = millis();
 
@@ -153,6 +163,7 @@ static void ota_task(void* pv) {
           if ((int)written >= contentLength) break;
         }
       }
+      vTaskDelay(pdMS_TO_TICKS(1));
     } else {
       // timeout de stream (evita loop infinito em conexão ruim)
       if (millis() - lastActivity > 20000) {
@@ -166,7 +177,7 @@ static void ota_task(void* pv) {
         vTaskDelete(nullptr);
         return;
       }
-      vTaskDelay(5);
+      vTaskDelay(pdMS_TO_TICKS(5));
     }
   }
 
@@ -220,6 +231,9 @@ bool ota_start_url(const char* url, bool reboot_after) {
   }
 
   auto* a = new OtaArgs{u, reboot_after};
+  if (!a) return false;
+
+  g_otaRunning = true;
 
   if (xTaskCreate(
         ota_task,
@@ -229,6 +243,7 @@ bool ota_start_url(const char* url, bool reboot_after) {
         1,
         nullptr
       ) != pdPASS) {
+    g_otaRunning = false;
     delete a;
     return false;
   }

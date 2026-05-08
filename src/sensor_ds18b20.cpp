@@ -2,6 +2,7 @@
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <math.h>
 
 // --- internos ---
 static OneWire* oneWire = nullptr;
@@ -17,6 +18,7 @@ static unsigned long tLastReq = 0;
 static unsigned long tConvStart = 0;
 
 static uint8_t resBits = 10;
+static const unsigned long REDISCOVER_MS = 2000;
 static const unsigned long TEMP_PERIOD_MS = 200; // pede conversão periodicamente
 
 static unsigned long conversionTimeMs(uint8_t bits) {
@@ -28,9 +30,27 @@ static unsigned long conversionTimeMs(uint8_t bits) {
   }
 }
 
+static bool temp_is_valid(float t) {
+  if (!isfinite(t)) return false;
+  if (t == DEVICE_DISCONNECTED_C) return false;
+  if (t <= -126.0f) return false;
+  if (fabsf(t - 85.0f) < 0.01f) return false;
+  if (t < -55.0f || t > 125.0f) return false;
+  return true;
+}
+
+static void mark_sensor_invalid() {
+  tempValid = false;
+  found = false;
+  convPending = false;
+}
+
 // Detecta pelo menos 1 sensor no barramento
 static bool find_first_sensor() {
   if (!sensors) return false;
+  sensors->begin();
+  sensors->setWaitForConversion(false);
+  sensors->setResolution(resBits);
   return (sensors->getDeviceCount() >= 1);
 }
 
@@ -55,12 +75,17 @@ void sensor_begin(uint8_t pinDQ, uint8_t resolutionBits) {
 void sensor_update(unsigned long nowMs) {
   if (!sensors) return;
 
-  // Se não achou, tenta redetectar a cada 1s
+  // Se não achou, tenta redetectar periodicamente.
   if (!found) {
     static unsigned long lastTry = 0;
-    if (nowMs - lastTry >= 1000) {
+    if (nowMs - lastTry >= REDISCOVER_MS) {
       lastTry = nowMs;
       found = find_first_sensor();
+      if (found) {
+        tempValid = false;
+        convPending = false;
+        tLastReq = nowMs;
+      }
     }
     return;
   }
@@ -79,9 +104,8 @@ void sensor_update(unsigned long nowMs) {
     convPending = false;
 
     float t = sensors->getTempCByIndex(0);
-    if (t == DEVICE_DISCONNECTED_C) {
-      tempValid = false;
-      found = false; // força re-detecção
+    if (!temp_is_valid(t)) {
+      mark_sensor_invalid();
       return;
     }
 

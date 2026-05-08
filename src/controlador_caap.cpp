@@ -1,5 +1,6 @@
 #include "controlador_caap.h"
 #include "mat.h"
+#include <math.h>
 
 // --- DEFINIÇÕES DE SEGURANÇA ---
 #define A1_MIN 0.80f   // Sistema térmico é lento (polo perto de 1)
@@ -117,12 +118,19 @@ void controlador_update(CAAP_Data &data, float temp_atual, float setpoint) {
 void controlador_apply_output(const CAAP_Data &data, uint8_t pin_ssr, unsigned long janela_ms) {
     static unsigned long inicio_janela = 0;
     unsigned long agora = millis();
+
+    float u = data.u_calculado;
+    if (janela_ms == 0 || !isfinite(u) || u <= 0.0f) {
+        digitalWrite(pin_ssr, LOW);
+        return;
+    }
+    if (u > 100.0f) u = 100.0f;
     
     if (agora - inicio_janela >= janela_ms) {
         inicio_janela = agora;
     }
 
-    unsigned long tempo_on = (unsigned long)((data.u_calculado / 100.0f) * janela_ms);
+    unsigned long tempo_on = (unsigned long)((u / 100.0f) * janela_ms);
 
     if ((agora - inicio_janela) < tempo_on) {
         digitalWrite(pin_ssr, HIGH);

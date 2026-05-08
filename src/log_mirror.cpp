@@ -37,8 +37,35 @@ static inline const char* lvl_to_char(uint8_t lvl) {
   }
 }
 
+static bool contains_i(const char* haystack, const char* needle) {
+  if (!haystack || !needle || !needle[0]) return false;
+
+  for (const char* h = haystack; *h; h++) {
+    const char* a = h;
+    const char* b = needle;
+    while (*a && *b) {
+      char ca = *a;
+      char cb = *b;
+      if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+      if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+      if (ca != cb) break;
+      a++;
+      b++;
+    }
+    if (!*b) return true;
+  }
+
+  return false;
+}
+
 LogLvl log_parse_level_char(const char* s) {
   if (!s || !s[0]) return LOG_I;
+
+  if (strcmp(s, "0") == 0) return LOG_D;
+  if (strcmp(s, "1") == 0) return LOG_I;
+  if (strcmp(s, "2") == 0) return LOG_W;
+  if (strcmp(s, "3") == 0) return LOG_E;
+
   char c = s[0];
   if (c=='D' || c=='d') return LOG_D;
   if (c=='I' || c=='i') return LOG_I;
@@ -88,8 +115,8 @@ static int my_vprintf(const char* fmt, va_list args) {
 
     // Heurística de nível: muitos logs já vêm com "[E]" etc.
     uint8_t lvl = LOG_I;
-    if (strstr(buf, "[E]") || strstr(buf, " E ") || strstr(buf, "error") ) lvl = LOG_E;
-    else if (strstr(buf, "[W]") || strstr(buf, " W ") || strstr(buf, "warn")) lvl = LOG_W;
+    if (strstr(buf, "[E]") || strstr(buf, " E ") || contains_i(buf, "error") || contains_i(buf, "fail")) lvl = LOG_E;
+    else if (strstr(buf, "[W]") || strstr(buf, " W ") || contains_i(buf, "warn")) lvl = LOG_W;
     else if (strstr(buf, "[D]") || strstr(buf, " D ") ) lvl = LOG_D;
 
     enqueue_line(lvl, buf);
